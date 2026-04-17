@@ -1,0 +1,64 @@
+# Feedback-to-LoRA config
+
+# Models
+target_model: "google/gemma-4-E4B-it"
+hypernetwork_backbone: "google/gemma-4-E2B-it"
+
+# LoRA
+lora_rank: 8
+lora_target_modules:
+  - q_proj
+  - v_proj
+  - up_proj
+  - down_proj
+lora_output_scale: 0.01
+
+# Training
+learning_rate: 2.0e-5
+batch_size: 4
+gradient_accumulation_steps: 4
+max_epochs: 10
+early_stopping_patience: 3
+warmup_ratio: 0.1
+max_grad_norm: 1.0
+max_feedback_length: 256
+max_query_length: 128
+eval_every_steps: 1000
+
+# Related queries (generalization)
+num_related_queries: 5
+
+# Data synthesis
+synth_api_model: "gpt-5-nano"
+feedback_styles:
+  - direct          # "아니야, X야"
+  - conversational  # "그거 아닌데? X 아니었나"
+  - terse           # "X임"
+  - partial         # "맞긴 한데 Y를 빠뜨렸어"
+  - multilingual    # "That's wrong, it should be X"
+feedback_augment_factor: 5
+
+# Splits
+train_ratio: 0.8
+val_ratio: 0.1
+test_ratio: 0.1
+seed: 42
+
+# Paths
+paths:
+  raw_simpleqa: "data/raw/simpleqa_verified.jsonl"
+  e4b_wrong_answers: "data/processed/e4b_wrong_answers.jsonl"
+  feedback_dataset: "data/processed/feedback_dataset.jsonl"
+  train_split: "data/splits/train.jsonl"
+  val_split: "data/splits/val.jsonl"
+  test_split: "data/splits/test.jsonl"
+  checkpoint_dir: "outputs/checkpoints"
+  results_dir: "outputs/results"
+
+# Ablation: Perceiver from scratch
+perceiver:
+  num_latents: 128
+  latent_dim: 768
+  num_self_attn_blocks: 8
+  num_heads: 8
+  ff_dim: 2048

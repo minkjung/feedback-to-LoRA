@@ -1,0 +1,164 @@
+"""Training loop: KL(student || teacher) over original + related queries."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from pathlib import Path
+
+import torch
+from torch.optim import AdamW
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from .dataset import FeedbackDataset, collate_singletons
+from .hypernetwork import FeedbackToLoRA
+from .losses import kl_distillation_loss
+from .target_model import TargetModel
+
+
+@dataclass
+class TrainConfig:
+    learning_rate: float
+    batch_size: int
+    gradient_accumulation_steps: int
+    max_epochs: int
+    early_stopping_patience: int
+    warmup_ratio: float
+    max_grad_norm: float
+    eval_every_steps: int
+    checkpoint_dir: str
+
+
+class Trainer:
+    def __init__(
+        self,
+        hypernetwork: FeedbackToLoRA,
+        target: TargetModel,
+        train_ds: FeedbackDataset,
+        val_ds: FeedbackDataset,
+        config: TrainConfig,
+        device: str = "cuda",
+    ):
+        self.hypernetwork = hypernetwork.to(device)
+        self.target = target.to(device)
+        self.config = config
+        self.device = device
+
+        self.train_loader = DataLoader(
+            train_ds,
+            batch_size=config.batch_size,
+            shuffle=True,
+            collate_fn=collate_singletons,
+        )
+        self.val_loader = DataLoader(
+            val_ds,
+            batch_size=config.batch_size,
+            shuffle=False,
+            collate_fn=collate_singletons,
+        )
+
+        trainable = [p for p in self.hypernetwork.parameters() if p.requires_grad]
+        self.optimizer = AdamW(trainable, lr=config.learning_rate)
+
+        total_steps = max(1, len(self.train_loader) * config.max_epochs)
+        self.warmup_steps = int(config.warmup_ratio * total_steps)
+        self.total_steps = total_steps
+
+        Path(config.checkpoint_dir).mkdir(parents=True, exist_ok=True)
+        self.best_val = math.inf
+        self.patience = 0
+        self.global_step = 0
+
+    # ---------- LR schedule (linear warmup + cosine decay) ----------
+
+    def _lr_scale(self, step: int) -> float:
+        if step < self.warmup_steps:
+            return step / max(1, self.warmup_steps)
+        progress = (step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
+        return 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
+
+    def _set_lr(self) -> None:
+        scale = self._lr_scale(self.global_step)
+        for g in self.optimizer.param_groups:
+            g["lr"] = self.config.learning_rate * scale
+
+    # ---------- per-sample loss ----------
+
+    def _sample_loss(self, sample: dict) -> torch.Tensor:
+        feedback_ids = sample["feedback_ids"].unsqueeze(0).to(self.device)
+        feedback_mask = sample["feedback_mask"].unsqueeze(0).to(self.device)
+
+        lora = self.hypernetwork(feedback_ids, feedback_mask)
+
+        queries = [sample["query"]] + list(sample["related_queries"])
+        loss = torch.zeros((), device=self.device)
+        for q in queries:
+            s_logits = self.target.student_forward(q, lora)
+            t_logits = self.target.teacher_forward(q, sample["feedback"])
+            # Align lengths: compare last token only (kl_distillation_loss does this).
+            loss = loss + kl_distillation_loss(s_logits, t_logits)
+        return loss / len(queries)
+
+    # ---------- step ----------
+
+    def train_step(self, batch: dict) -> float:
+        self.hypernetwork.train()
+        self.optimizer.zero_grad()
+        accum = self.config.gradient_accumulation_steps
+        total = 0.0
+        for sample in batch["samples"]:
+            loss = self._sample_loss(sample) / accum
+            loss.backward()
+            total += loss.item()
+        torch.nn.utils.clip_grad_norm_(self.hypernetwork.parameters(), self.config.max_grad_norm)
+        self._set_lr()
+        self.optimizer.step()
+        self.global_step += 1
+        return total
+
+    @torch.no_grad()
+    def validate(self) -> float:
+        self.hypernetwork.eval()
+        losses: list[float] = []
+        for batch in self.val_loader:
+            for sample in batch["samples"]:
+                losses.append(self._sample_loss(sample).item())
+        return sum(losses) / max(1, len(losses))
+
+    # ---------- main loop ----------
+
+    def fit(self) -> dict:
+        history: dict[str, list[float]] = {"train": [], "val": []}
+        for epoch in range(self.config.max_epochs):
+            pbar = tqdm(self.train_loader, desc=f"epoch {epoch}")
+            for batch in pbar:
+                loss = self.train_step(batch)
+                history["train"].append(loss)
+                pbar.set_postfix(loss=f"{loss:.4f}")
+
+                if self.global_step % self.config.eval_every_steps == 0:
+                    val_loss = self.validate()
+                    history["val"].append(val_loss)
+                    self._maybe_checkpoint(val_loss)
+                    if self.patience >= self.config.early_stopping_patience:
+                        return history
+
+            val_loss = self.validate()
+            history["val"].append(val_loss)
+            self._maybe_checkpoint(val_loss)
+            if self.patience >= self.config.early_stopping_patience:
+                return history
+        return history
+
+    def _maybe_checkpoint(self, val_loss: float) -> None:
+        if val_loss < self.best_val:
+            self.best_val = val_loss
+            self.patience = 0
+            path = Path(self.config.checkpoint_dir) / "best.pt"
+            torch.save(
+                {"model": self.hypernetwork.state_dict(), "val_loss": val_loss, "step": self.global_step},
+                path,
+            )
+        else:
+            self.patience += 1

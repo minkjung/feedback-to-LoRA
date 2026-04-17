@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+.Python
+*.manifest
+*.spec
+.installed.cfg
+*.cfg
+!pyproject.toml
+
+# Virtual env
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Outputs / checkpoints / data
+outputs/checkpoints/*
+!outputs/checkpoints/.gitkeep
+outputs/results/*
+!outputs/results/.gitkeep
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/splits/*
+!data/splits/.gitkeep
+*.pt
+*.bin
+*.safetensors
+
+# Logs
+*.log
+wandb/
+runs/
+logs/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# OS
+Thumbs.db

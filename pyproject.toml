@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feedback-to-lora"
+version = "0.1.0"
+description = "Hypernetwork that converts natural language correction feedback into LoRA weight deltas."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "feedback-to-lora authors" }]
+
+dependencies = [
+    "torch>=2.4",
+    "transformers>=4.48",
+    "peft>=0.14",
+    "accelerate>=1.2",
+    "datasets",
+    "openai",
+    "pyyaml",
+    "tqdm",
+    "matplotlib",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "ipython",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
