@@ -67,6 +67,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--exp-id", default=None,
                    help="experiment id; isolates checkpoints + wandb run. "
                         "resumes if checkpoint exists for this id.")
+    p.add_argument("--lora-output-scale", type=float, default=None,
+                   help="override lora_output_scale (default 0.01)")
+    p.add_argument("--lr", type=float, default=None,
+                   help="override learning_rate")
+    p.add_argument("--lora-rank", type=int, default=None,
+                   help="override lora_rank")
     return p.parse_args()
 
 
@@ -84,6 +90,13 @@ def main() -> None:
     cfg = load_config(args.config)
     if args.checkpoint_dir:
         cfg["paths"]["checkpoint_dir"] = args.checkpoint_dir
+
+    if args.lora_output_scale is not None:
+        cfg["lora_output_scale"] = args.lora_output_scale
+    if args.lr is not None:
+        cfg["learning_rate"] = args.lr
+    if args.lora_rank is not None:
+        cfg["lora_rank"] = args.lora_rank
 
     exp_id = args.exp_id
     if not exp_id:
