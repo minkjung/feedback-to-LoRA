@@ -28,7 +28,8 @@ class FeedbackToLoRA(nn.Module):
         self.output_scale = output_scale
 
         self.backbone = AutoModel.from_pretrained(backbone_name, torch_dtype=dtype)
-        backbone_hidden = self.backbone.config.hidden_size
+        cfg = self.backbone.config
+        backbone_hidden = getattr(cfg, "hidden_size", None) or cfg.text_config.hidden_size
 
         self.projections = nn.ModuleDict()
         for i in range(spec.num_layers):
