@@ -59,12 +59,15 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--config", default="configs/config.yaml")
     p.add_argument("--device", default="cuda")
+    p.add_argument("--checkpoint-dir", default=None, help="override config checkpoint_dir")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
+    if args.checkpoint_dir:
+        cfg["paths"]["checkpoint_dir"] = args.checkpoint_dir
 
     download_splits(cfg)
 

@@ -52,7 +52,7 @@ paths:
   train_split: "data/splits/train.jsonl"
   val_split: "data/splits/val.jsonl"
   test_split: "data/splits/test.jsonl"
-  checkpoint_dir: "outputs/checkpoints"
+  checkpoint_dir: "/dev/shm/checkpoints"
   results_dir: "outputs/results"
 
 # Ablation: Perceiver from scratch
