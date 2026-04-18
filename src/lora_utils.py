@@ -49,6 +49,12 @@ def build_lora_spec(target_model: nn.Module, target_modules: list[str], rank: in
 
 
 def _find_decoder_layers(module: nn.Module) -> list[nn.Module]:
+    # For multimodal models, prioritize language_model to avoid vision encoder layers
+    lang = getattr(module, "language_model", None)
+    if lang is not None:
+        result = _find_decoder_layers(lang)
+        if result:
+            return result
     for name in ("layers", "decoder", "h", "blocks"):
         sub = getattr(module, name, None)
         if isinstance(sub, nn.ModuleList):

@@ -15,12 +15,8 @@ class TargetModel:
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        from transformers import AutoConfig
-        full_cfg = AutoConfig.from_pretrained(model_name)
-        text_cfg = getattr(full_cfg, "text_config", full_cfg)
         self.model: nn.Module = AutoModelForCausalLM.from_pretrained(
             model_name,
-            config=text_cfg,
             dtype=torch.bfloat16,
         )
         self.model.eval()
