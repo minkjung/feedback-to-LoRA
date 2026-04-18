@@ -21,8 +21,8 @@ from src.dataset import load_jsonl, write_jsonl
 from src.evaluator import is_correct
 from src.target_model import TargetModel
 
-HF_CHECKPOINT_REPO = "minkjung/feedback-to-lora-step0-checkpoint"
-PUSH_EVERY = 50
+HF_CHECKPOINT_REPO = "james-kernel/feedback-to-lora-step0-checkpoint"
+PUSH_EVERY = 10
 
 
 def push_to_hub(results: list[dict], repo_id: str) -> None:
