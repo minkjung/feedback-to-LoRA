@@ -160,5 +160,23 @@ class Trainer:
                 {"model": self.hypernetwork.state_dict(), "val_loss": val_loss, "step": self.global_step},
                 path,
             )
+            self._upload_checkpoint(path)
         else:
             self.patience += 1
+
+    def _upload_checkpoint(self, path: Path) -> None:
+        try:
+            from huggingface_hub import HfApi
+            import os
+            repo_id = "james-kernel/feedback-to-lora-checkpoints"
+            api = HfApi()
+            api.create_repo(repo_id, repo_type="model", exist_ok=True)
+            api.upload_file(
+                path_or_fileobj=str(path),
+                path_in_repo=path.name,
+                repo_id=repo_id,
+                repo_type="model",
+            )
+            print(f"[hub] checkpoint uploaded -> {repo_id}/{path.name} (step {self.global_step})")
+        except Exception as e:
+            print(f"[hub] upload failed (non-fatal): {e}")
