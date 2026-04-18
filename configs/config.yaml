@@ -29,7 +29,7 @@ eval_every_steps: 1000
 num_related_queries: 5
 
 # Data synthesis
-synth_api_model: "gpt-5-nano"
+synth_api_model: "gpt-5.4-nano"
 feedback_styles:
   - direct          # "아니야, X야"
   - conversational  # "그거 아닌데? X 아니었나"

@@ -61,12 +61,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def call_openai(client, model: str, prompt: str) -> str:
-    resp = client.chat.completions.create(
+    resp = client.responses.create(
         model=model,
-        messages=[{"role": "user", "content": prompt}],
-        reasoning_effort="none",
+        input=prompt,
+        reasoning={"effort": "none"},
     )
-    return resp.choices[0].message.content.strip()
+    return resp.output_text.strip()
 
 
 def gold_leak_filter(feedback: str, gold: str) -> bool:
