@@ -28,6 +28,7 @@ class TrainConfig:
     max_grad_norm: float
     eval_every_steps: int
     checkpoint_dir: str
+    save_every_steps: int = 200
 
 
 class Trainer:
@@ -69,6 +70,8 @@ class Trainer:
         self.best_val = math.inf
         self.patience = 0
         self.global_step = 0
+        self.start_epoch = 0
+        self._maybe_resume()
 
         try:
             import wandb
@@ -85,6 +88,35 @@ class Trainer:
         except Exception as e:
             print(f"[wandb] disabled: {e}")
             self.wandb = None
+
+    # ---------- resume ----------
+
+    def _maybe_resume(self) -> None:
+        resume_path = Path(self.config.checkpoint_dir) / "latest.pt"
+        if not resume_path.exists():
+            self._try_download_resume(resume_path)
+        if not resume_path.exists():
+            return
+        ckpt = torch.load(resume_path, map_location=self.device)
+        self.hypernetwork.load_state_dict(ckpt["model"])
+        self.optimizer.load_state_dict(ckpt["optimizer"])
+        self.global_step = ckpt.get("step", 0)
+        self.start_epoch = ckpt.get("epoch", 0)
+        self.best_val = ckpt.get("best_val", math.inf)
+        self.patience = ckpt.get("patience", 0)
+        print(f"[resume] step={self.global_step}, epoch={self.start_epoch}, best_val={self.best_val:.4f}")
+
+    def _try_download_resume(self, dest: Path) -> None:
+        try:
+            from huggingface_hub import hf_hub_download
+            import os
+            repo_id = "james-kernel/feedback-to-lora-checkpoints"
+            path = hf_hub_download(repo_id=repo_id, filename="latest.pt", repo_type="model")
+            import shutil
+            shutil.copy(path, dest)
+            print(f"[resume] downloaded latest.pt from hub")
+        except Exception:
+            pass
 
     # ---------- LR schedule (linear warmup + cosine decay) ----------
 
@@ -157,7 +189,7 @@ class Trainer:
 
     def fit(self) -> dict:
         history: dict[str, list[float]] = {"train": [], "val": []}
-        for epoch in range(self.config.max_epochs):
+        for epoch in range(self.start_epoch, self.config.max_epochs):
             pbar = tqdm(self.train_loader, desc=f"epoch {epoch}")
             for batch in pbar:
                 loss = self.train_step(batch)
@@ -167,12 +199,17 @@ class Trainer:
                 if self.wandb:
                     self.wandb.log({"train/loss": loss, "step": self.global_step})
 
+                if self.global_step % self.config.save_every_steps == 0:
+                    latest = Path(self.config.checkpoint_dir) / "latest.pt"
+                    self._save(latest, epoch)
+                    self._upload_checkpoint(latest)
+
                 if self.global_step % self.config.eval_every_steps == 0:
                     val_loss = self.validate()
                     history["val"].append(val_loss)
                     if self.wandb:
                         self.wandb.log({"val/loss": val_loss, "step": self.global_step})
-                    self._maybe_checkpoint(val_loss)
+                    self._maybe_checkpoint(val_loss, epoch)
                     if self.patience >= self.config.early_stopping_patience:
                         return history
 
@@ -180,20 +217,31 @@ class Trainer:
             history["val"].append(val_loss)
             if self.wandb:
                 self.wandb.log({"val/loss": val_loss, "epoch": epoch, "step": self.global_step})
-            self._maybe_checkpoint(val_loss)
+            self._maybe_checkpoint(val_loss, epoch)
             if self.patience >= self.config.early_stopping_patience:
                 return history
         return history
 
-    def _maybe_checkpoint(self, val_loss: float) -> None:
+    def _save(self, path: Path, epoch: int, val_loss: float | None = None) -> None:
+        torch.save(
+            {
+                "model": self.hypernetwork.state_dict(),
+                "optimizer": self.optimizer.state_dict(),
+                "step": self.global_step,
+                "epoch": epoch,
+                "best_val": self.best_val,
+                "patience": self.patience,
+                "val_loss": val_loss,
+            },
+            path,
+        )
+
+    def _maybe_checkpoint(self, val_loss: float, epoch: int) -> None:
         if val_loss < self.best_val:
             self.best_val = val_loss
             self.patience = 0
             path = Path(self.config.checkpoint_dir) / "best.pt"
-            torch.save(
-                {"model": self.hypernetwork.state_dict(), "val_loss": val_loss, "step": self.global_step},
-                path,
-            )
+            self._save(path, epoch, val_loss)
             self._upload_checkpoint(path)
         else:
             self.patience += 1
