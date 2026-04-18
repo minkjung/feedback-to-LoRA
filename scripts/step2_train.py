@@ -64,6 +64,9 @@ def parse_args() -> argparse.Namespace:
                    help="vast.ai instance id to stop on exit (success or error)")
     p.add_argument("--save-every-steps", type=int, default=None,
                    help="override TrainConfig.save_every_steps (default 200)")
+    p.add_argument("--exp-id", default=None,
+                   help="experiment id; isolates checkpoints + wandb run. "
+                        "resumes if checkpoint exists for this id.")
     return p.parse_args()
 
 
@@ -81,6 +84,16 @@ def main() -> None:
     cfg = load_config(args.config)
     if args.checkpoint_dir:
         cfg["paths"]["checkpoint_dir"] = args.checkpoint_dir
+
+    exp_id = args.exp_id
+    if not exp_id:
+        from datetime import datetime
+        exp_id = datetime.now().strftime("exp-%Y%m%d-%H%M%S")
+        print(f"[exp-id] auto-generated: {exp_id} (pass --exp-id {exp_id} to resume)")
+    cfg["paths"]["checkpoint_dir"] = str(
+        Path(cfg["paths"]["checkpoint_dir"]) / exp_id
+    )
+    os.environ["WANDB_NAME"] = exp_id
 
     download_splits(cfg)
 
