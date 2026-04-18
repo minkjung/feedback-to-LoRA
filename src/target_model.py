@@ -36,10 +36,14 @@ class TargetModel:
     # ---------- prompt formatting ----------
 
     def _format_query(self, query: str) -> str:
-        return f"질문: {query}\n답:"
+        messages = [{"role": "user", "content": query}]
+        return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     def _format_query_with_feedback(self, query: str, feedback: str) -> str:
-        return f"다음 정보를 참고해서 답해: {feedback}\n\n질문: {query}\n답:"
+        messages = [
+            {"role": "user", "content": f"{feedback}\n\n{query}"},
+        ]
+        return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     # ---------- forward (returns logits) ----------
 
