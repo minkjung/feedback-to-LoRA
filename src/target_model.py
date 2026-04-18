@@ -26,6 +26,8 @@ class TargetModel:
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
+        if hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model.gradient_checkpointing_enable()
 
         self.spec: LoRASpec = build_lora_spec(self.model, lora_target_modules, lora_rank)
 

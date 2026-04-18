@@ -31,6 +31,8 @@ class FeedbackToLoRA(nn.Module):
         full_cfg = AutoConfig.from_pretrained(backbone_name)
         text_cfg = getattr(full_cfg, "text_config", full_cfg)
         self.backbone = AutoModel.from_pretrained(backbone_name, config=text_cfg, dtype=dtype)
+        for p in self.backbone.parameters():
+            p.requires_grad = False
         cfg = self.backbone.config
         backbone_hidden = getattr(cfg, "hidden_size", None) or cfg.text_config.hidden_size
 

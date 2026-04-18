@@ -15,8 +15,8 @@ lora_output_scale: 0.01
 
 # Training
 learning_rate: 2.0e-5
-batch_size: 4
-gradient_accumulation_steps: 4
+batch_size: 1
+gradient_accumulation_steps: 16
 max_epochs: 10
 early_stopping_patience: 3
 warmup_ratio: 0.1
@@ -26,7 +26,7 @@ max_query_length: 128
 eval_every_steps: 1000
 
 # Related queries (generalization)
-num_related_queries: 5
+num_related_queries: 3
 
 # Data synthesis
 synth_api_model: "gpt-5.4-nano"
