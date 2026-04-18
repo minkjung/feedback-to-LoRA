@@ -27,7 +27,10 @@ class FeedbackToLoRA(nn.Module):
         self.spec = spec
         self.output_scale = output_scale
 
-        self.backbone = AutoModel.from_pretrained(backbone_name, dtype=dtype)
+        from transformers import AutoConfig
+        full_cfg = AutoConfig.from_pretrained(backbone_name)
+        text_cfg = getattr(full_cfg, "text_config", full_cfg)
+        self.backbone = AutoModel.from_pretrained(backbone_name, config=text_cfg, dtype=dtype)
         cfg = self.backbone.config
         backbone_hidden = getattr(cfg, "hidden_size", None) or cfg.text_config.hidden_size
 
