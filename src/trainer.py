@@ -71,31 +71,32 @@ class Trainer:
         self.patience = 0
         self.global_step = 0
         self.start_epoch = 0
+        self._resume_wandb_id: str | None = None
         self._maybe_resume()
 
+        self.wandb = None
         try:
             import wandb
             import os
             if os.environ.get("WANDB_API_KEY"):
+                run_id = self._resume_wandb_id
                 wandb.init(
                     project="feedback-to-lora",
                     config=vars(config),
                     settings=wandb.Settings(init_timeout=300),
+                    id=run_id,
+                    resume="allow" if run_id else None,
                 )
                 self.wandb = wandb
-            else:
-                self.wandb = None
         except Exception as e:
             print(f"[wandb] disabled: {e}")
-            self.wandb = None
 
     # ---------- resume ----------
 
     def _maybe_resume(self) -> None:
         resume_path = Path(self.config.checkpoint_dir) / "latest.pt"
         if not resume_path.exists():
-            self._try_download_resume(resume_path)
-        if not resume_path.exists():
+            # Local-only: latest.pt is not uploaded to HF anymore.
             return
         ckpt = torch.load(resume_path, map_location=self.device)
         # strict=False because backbone.* keys are intentionally absent (frozen)
@@ -106,6 +107,7 @@ class Trainer:
         self.start_epoch = ckpt.get("epoch", 0)
         self.best_val = ckpt.get("best_val", math.inf)
         self.patience = ckpt.get("patience", 0)
+        self._resume_wandb_id = ckpt.get("wandb_id")
         print(f"[resume] step={self.global_step}, epoch={self.start_epoch}, best_val={self.best_val:.4f}")
 
     def _try_download_resume(self, dest: Path) -> None:
@@ -202,11 +204,8 @@ class Trainer:
                     self.wandb.log({"train/loss": loss, "step": self.global_step})
 
                 if self.global_step % self.config.save_every_steps == 0:
-                    ckpt_dir = Path(self.config.checkpoint_dir)
-                    self._save(ckpt_dir / "latest.pt", epoch)
-                    light = ckpt_dir / "latest_light.pt"
-                    self._save_light(light, epoch)
-                    self._upload_checkpoint(light)
+                    # Local-only save for in-instance resume; no HF upload (too slow).
+                    self._save(Path(self.config.checkpoint_dir) / "latest.pt", epoch)
 
                 if self.global_step % self.config.eval_every_steps == 0:
                     val_loss = self.validate()
@@ -244,6 +243,7 @@ class Trainer:
                 "best_val": self.best_val,
                 "patience": self.patience,
                 "val_loss": val_loss,
+                "wandb_id": self.wandb.run.id if self.wandb else None,
             },
             path,
         )
