@@ -86,7 +86,8 @@ class PerceiverToLoRA(nn.Module):
         self.token_encoder = AutoModel.from_pretrained(token_encoder_name, torch_dtype=dtype)
         for p in self.token_encoder.parameters():
             p.requires_grad = False
-        kv_dim = self.token_encoder.config.hidden_size
+        _cfg = self.token_encoder.config
+        kv_dim = getattr(_cfg, "hidden_size", None) or _cfg.text_config.hidden_size
 
         self.latents = nn.Parameter(torch.randn(num_latents, latent_dim) * 0.02)
         self.cross_attn = CrossAttentionBlock(latent_dim, kv_dim, num_heads, ff_dim)
@@ -97,12 +98,13 @@ class PerceiverToLoRA(nn.Module):
         self.projections = nn.ModuleDict()
         for i in range(spec.num_layers):
             for m in spec.target_modules:
-                target_dim = spec.target_hidden_dims[m]
-                out_dim = spec.rank * target_dim * 2
+                in_dim = spec.target_hidden_dims[m]
+                out_dim = spec.target_out_dims[m]
+                proj_out = spec.rank * in_dim + spec.rank * out_dim
                 self.projections[f"layer_{i}_{m}"] = nn.Sequential(
                     nn.Linear(latent_dim, projection_hidden),
                     nn.GELU(),
-                    nn.Linear(projection_hidden, out_dim),
+                    nn.Linear(projection_hidden, proj_out),
                 )
 
     def forward(
@@ -131,13 +133,14 @@ class PerceiverToLoRA(nn.Module):
         for key, proj in self.projections.items():
             parts = key.split("_", 2)
             module_name = parts[2]
-            target_dim = self.spec.target_hidden_dims[module_name]
+            in_dim = self.spec.target_hidden_dims[module_name]
+            out_dim = self.spec.target_out_dims[module_name]
 
             ab = proj(rep) * self.output_scale
-            half = rank * target_dim
+            half = rank * in_dim
             A_flat, B_flat = ab[:half], ab[half:]
-            A = A_flat.view(rank, target_dim)
-            B = B_flat.view(target_dim, rank)
+            A = A_flat.view(rank, in_dim)
+            B = B_flat.view(out_dim, rank)
             lora_weights[key] = (A, B)
 
         return lora_weights

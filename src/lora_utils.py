@@ -16,7 +16,8 @@ class LoRASpec:
     num_layers: int
     target_modules: list[str]
     rank: int
-    target_hidden_dims: dict[str, int]  # module name -> in/out dim used by hypernetwork
+    target_hidden_dims: dict[str, int]       # module name -> in_features
+    target_out_dims: dict[str, int]          # module name -> out_features
 
     def layer_module_keys(self) -> list[str]:
         """Stable ordered keys: layer_{i}_{module}."""
@@ -31,19 +32,22 @@ def build_lora_spec(target_model: nn.Module, target_modules: list[str], rank: in
     layers = _find_decoder_layers(base)
     num_layers = len(layers)
 
-    dims: dict[str, int] = {}
+    in_dims: dict[str, int] = {}
+    out_dims: dict[str, int] = {}
     sample = layers[0]
     for m in target_modules:
         linear = _find_named_linear(sample, m)
         if linear is None:
             raise ValueError(f"Could not find linear `{m}` in decoder layer.")
-        dims[m] = linear.in_features
+        in_dims[m] = linear.in_features
+        out_dims[m] = linear.out_features
 
     return LoRASpec(
         num_layers=num_layers,
         target_modules=list(target_modules),
         rank=rank,
-        target_hidden_dims=dims,
+        target_hidden_dims=in_dims,
+        target_out_dims=out_dims,
     )
 
 

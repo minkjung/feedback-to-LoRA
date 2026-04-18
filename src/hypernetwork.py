@@ -34,12 +34,13 @@ class FeedbackToLoRA(nn.Module):
         self.projections = nn.ModuleDict()
         for i in range(spec.num_layers):
             for m in spec.target_modules:
-                target_dim = spec.target_hidden_dims[m]
-                out_dim = spec.rank * target_dim * 2  # concat(A, B)
+                in_dim = spec.target_hidden_dims[m]
+                out_dim = spec.target_out_dims[m]
+                proj_out = spec.rank * in_dim + spec.rank * out_dim  # A: (rank, in), B: (out, rank)
                 self.projections[f"layer_{i}_{m}"] = nn.Sequential(
                     nn.Linear(backbone_hidden, projection_hidden),
                     nn.GELU(),
-                    nn.Linear(projection_hidden, out_dim),
+                    nn.Linear(projection_hidden, proj_out),
                 ).to(dtype)
 
     def forward(
@@ -66,13 +67,14 @@ class FeedbackToLoRA(nn.Module):
             # keys are "layer_{i}_{module}", and module may itself contain '_' (e.g. q_proj)
             parts = key.split("_", 2)
             module_name = parts[2]
-            target_dim = self.spec.target_hidden_dims[module_name]
 
-            ab = proj(rep) * self.output_scale  # (rank * target_dim * 2,)
-            half = rank * target_dim
+            ab = proj(rep) * self.output_scale
+            in_dim = self.spec.target_hidden_dims[module_name]
+            out_dim = self.spec.target_out_dims[module_name]
+            half = rank * in_dim
             A_flat, B_flat = ab[:half], ab[half:]
-            A = A_flat.view(rank, target_dim)
-            B = B_flat.view(target_dim, rank)
+            A = A_flat.view(rank, in_dim)
+            B = B_flat.view(out_dim, rank)
             lora_weights[key] = (A, B)
 
         return lora_weights
