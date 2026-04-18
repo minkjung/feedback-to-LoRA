@@ -148,10 +148,10 @@ class Trainer:
         for i, q in enumerate(queries):
             s_logits = self.target.student_forward(q, lora)
             t_logits = self.target.teacher_forward(q, sample["feedback"])
-            loss = kl_distillation_loss(s_logits, t_logits) * scale / len(queries)
-            # retain_graph keeps lora graph alive across queries; free on last query
-            loss.backward(retain_graph=(i < len(queries) - 1))
-            total += loss.item()
+            kl = kl_distillation_loss(s_logits, t_logits)
+            (kl * scale / len(queries)).backward(retain_graph=(i < len(queries) - 1))
+            # Report raw per-query KL (unscaled) so train/loss matches val/loss scale
+            total += kl.item() / len(queries)
         return total
 
     # ---------- step ----------
