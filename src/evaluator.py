@@ -13,7 +13,11 @@ from .target_model import TargetModel
 
 
 def normalize(text: str) -> str:
-    return " ".join(text.lower().strip().split())
+    import re
+    text = text.lower().strip()
+    text = re.sub(r",(?=\d)", "", text)  # remove thousands separators: 120,000 -> 120000
+    text = re.sub(r"\s+", " ", text)
+    return text
 
 
 def is_correct(answer: str, gold: str) -> bool:

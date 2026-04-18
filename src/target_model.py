@@ -36,11 +36,15 @@ class TargetModel:
     # ---------- prompt formatting ----------
 
     def _format_query(self, query: str) -> str:
-        messages = [{"role": "user", "content": query}]
+        messages = [
+            {"role": "system", "content": "Answer in as few words as possible. If you don't know, say 'I don't know'."},
+            {"role": "user", "content": query},
+        ]
         return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     def _format_query_with_feedback(self, query: str, feedback: str) -> str:
         messages = [
+            {"role": "system", "content": "Answer in as few words as possible. If you don't know, say 'I don't know'."},
             {"role": "user", "content": f"{feedback}\n\n{query}"},
         ]
         return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
