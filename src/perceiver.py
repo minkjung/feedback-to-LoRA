@@ -83,7 +83,7 @@ class PerceiverToLoRA(nn.Module):
         self.output_scale = output_scale
 
         # Frozen token encoder for feedback hidden states
-        self.token_encoder = AutoModel.from_pretrained(token_encoder_name, torch_dtype=dtype)
+        self.token_encoder = AutoModel.from_pretrained(token_encoder_name, dtype=dtype)
         for p in self.token_encoder.parameters():
             p.requires_grad = False
         _cfg = self.token_encoder.config

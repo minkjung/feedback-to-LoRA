@@ -17,7 +17,7 @@ class TargetModel:
 
         self.model: nn.Module = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
         )
         self.model.eval()
         for p in self.model.parameters():
