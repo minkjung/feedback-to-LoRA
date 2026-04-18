@@ -74,7 +74,11 @@ class Trainer:
             import wandb
             import os
             if os.environ.get("WANDB_API_KEY"):
-                wandb.init(project="feedback-to-lora", config=vars(config))
+                wandb.init(
+                    project="feedback-to-lora",
+                    config=vars(config),
+                    settings=wandb.Settings(init_timeout=300),
+                )
                 self.wandb = wandb
             else:
                 self.wandb = None
