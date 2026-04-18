@@ -40,7 +40,7 @@ class FeedbackToLoRA(nn.Module):
                     nn.Linear(backbone_hidden, projection_hidden),
                     nn.GELU(),
                     nn.Linear(projection_hidden, out_dim),
-                )
+                ).to(dtype)
 
     def forward(
         self,
