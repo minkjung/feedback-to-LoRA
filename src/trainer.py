@@ -201,7 +201,7 @@ class Trainer:
                 pbar.set_postfix(loss=f"{loss:.4f}")
 
                 if self.wandb:
-                    self.wandb.log({"train/loss": loss, "step": self.global_step})
+                    self.wandb.log({"train/loss": loss}, step=self.global_step)
 
                 if self.global_step % self.config.save_every_steps == 0:
                     # Local-only save for in-instance resume; no HF upload (too slow).
@@ -211,7 +211,7 @@ class Trainer:
                     val_loss = self.validate()
                     history["val"].append(val_loss)
                     if self.wandb:
-                        self.wandb.log({"val/loss": val_loss, "step": self.global_step})
+                        self.wandb.log({"val/loss": val_loss}, step=self.global_step)
                     self._maybe_checkpoint(val_loss, epoch)
                     if self.patience >= self.config.early_stopping_patience:
                         return history
@@ -219,7 +219,7 @@ class Trainer:
             val_loss = self.validate()
             history["val"].append(val_loss)
             if self.wandb:
-                self.wandb.log({"val/loss": val_loss, "epoch": epoch, "step": self.global_step})
+                self.wandb.log({"val/loss": val_loss, "epoch": epoch}, step=self.global_step)
             self._maybe_checkpoint(val_loss, epoch)
             if self.patience >= self.config.early_stopping_patience:
                 return history
