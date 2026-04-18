@@ -1,13 +1,15 @@
 """
 Step 2: Train FeedbackToLoRA hypernetwork.
 
-Input:  data/splits/{train,val}.jsonl
-Output: outputs/checkpoints/best.pt
+Input:  HuggingFace Hub (james-kernel/feedback-to-lora-step1)
+Output: outputs/checkpoints/best.pt  +  HF hub upload
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+from pathlib import Path
 
 import torch
 
@@ -16,6 +18,41 @@ from src.dataset import FeedbackDataset
 from src.hypernetwork import FeedbackToLoRA
 from src.target_model import TargetModel
 from src.trainer import TrainConfig, Trainer
+
+HF_DATA_REPO = "james-kernel/feedback-to-lora-step1"
+HF_CKPT_REPO = "james-kernel/feedback-to-lora-checkpoints"
+
+
+def download_splits(cfg: dict) -> None:
+    from huggingface_hub import hf_hub_download
+    for fname, key in [
+        ("train.jsonl", "train_split"),
+        ("val.jsonl", "val_split"),
+        ("test.jsonl", "test_split"),
+    ]:
+        dest = resolve(cfg["paths"][key])
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            path = hf_hub_download(repo_id=HF_DATA_REPO, filename=fname, repo_type="dataset")
+            import shutil
+            shutil.copy(path, dest)
+            print(f"downloaded {fname} -> {dest}")
+
+
+def upload_checkpoint(ckpt_path: Path) -> None:
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        api.create_repo(HF_CKPT_REPO, repo_type="model", exist_ok=True)
+        api.upload_file(
+            path_or_fileobj=str(ckpt_path),
+            path_in_repo=ckpt_path.name,
+            repo_id=HF_CKPT_REPO,
+            repo_type="model",
+        )
+        print(f"uploaded checkpoint -> {HF_CKPT_REPO}/{ckpt_path.name}")
+    except Exception as e:
+        print(f"checkpoint upload failed (non-fatal): {e}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,14 +66,14 @@ def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
 
-    # Target model (frozen, also provides tokenizer for the target)
+    download_splits(cfg)
+
     target = TargetModel(
         cfg["target_model"],
         cfg["lora_target_modules"],
         cfg["lora_rank"],
     ).to(args.device)
 
-    # Hypernetwork
     from transformers import AutoTokenizer
     hn_tokenizer = AutoTokenizer.from_pretrained(cfg["hypernetwork_backbone"])
     if hn_tokenizer.pad_token_id is None:
@@ -49,7 +86,6 @@ def main() -> None:
         dtype=torch.bfloat16,
     ).to(args.device)
 
-    # Datasets
     train_ds = FeedbackDataset(
         resolve(cfg["paths"]["train_split"]),
         hn_tokenizer,
@@ -83,9 +119,11 @@ def main() -> None:
         config=train_cfg,
         device=args.device,
     )
-    history = trainer.fit()
+    trainer.fit()
     print(f"done. best val loss: {trainer.best_val:.4f}")
-    print(f"checkpoint at {train_cfg.checkpoint_dir}/best.pt")
+
+    ckpt_path = Path(train_cfg.checkpoint_dir) / "best.pt"
+    upload_checkpoint(ckpt_path)
 
 
 if __name__ == "__main__":
