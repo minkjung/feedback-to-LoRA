@@ -64,6 +64,7 @@ def call_openai(client, model: str, prompt: str) -> str:
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
+        reasoning_effort="none",
     )
     return resp.choices[0].message.content.strip()
 
