@@ -60,7 +60,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", default="configs/config.yaml")
     p.add_argument("--device", default="cuda")
     p.add_argument("--checkpoint-dir", default=None, help="override config checkpoint_dir")
+    p.add_argument("--stop-instance", default=None,
+                   help="vast.ai instance id to stop on exit (success or error)")
     return p.parse_args()
+
+
+def stop_vastai(instance_id: str) -> None:
+    import subprocess
+    try:
+        subprocess.run(["vastai", "stop", "instance", instance_id], check=False)
+        print(f"[autostop] stopped vast.ai instance {instance_id}")
+    except Exception as e:
+        print(f"[autostop] failed: {e}")
 
 
 def main() -> None:
@@ -122,11 +133,24 @@ def main() -> None:
         config=train_cfg,
         device=args.device,
     )
-    trainer.fit()
-    print(f"done. best val loss: {trainer.best_val:.4f}")
 
-    ckpt_path = Path(train_cfg.checkpoint_dir) / "best.pt"
-    upload_checkpoint(ckpt_path)
+    should_stop = False
+    try:
+        trainer.fit()
+        print(f"done. best val loss: {trainer.best_val:.4f}")
+        ckpt_path = Path(train_cfg.checkpoint_dir) / "best.pt"
+        upload_checkpoint(ckpt_path)
+        should_stop = True  # normal completion
+    except KeyboardInterrupt:
+        print("\n[autostop] Ctrl+C detected, instance will stay alive")
+        should_stop = False
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        should_stop = True  # unexpected error: stop to avoid burning money
+
+    if should_stop and args.stop_instance:
+        stop_vastai(args.stop_instance)
 
 
 if __name__ == "__main__":
