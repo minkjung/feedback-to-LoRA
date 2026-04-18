@@ -62,6 +62,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint-dir", default=None, help="override config checkpoint_dir")
     p.add_argument("--stop-instance", default=None,
                    help="vast.ai instance id to stop on exit (success or error)")
+    p.add_argument("--save-every-steps", type=int, default=None,
+                   help="override TrainConfig.save_every_steps (default 200)")
     return p.parse_args()
 
 
@@ -123,6 +125,7 @@ def main() -> None:
         max_grad_norm=cfg["max_grad_norm"],
         eval_every_steps=cfg["eval_every_steps"],
         checkpoint_dir=str(resolve(cfg["paths"]["checkpoint_dir"])),
+        **({"save_every_steps": args.save_every_steps} if args.save_every_steps else {}),
     )
 
     trainer = Trainer(
