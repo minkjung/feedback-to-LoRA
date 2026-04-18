@@ -82,7 +82,8 @@ class Trainer:
                 self.wandb = wandb
             else:
                 self.wandb = None
-        except ImportError:
+        except Exception as e:
+            print(f"[wandb] disabled: {e}")
             self.wandb = None
 
     # ---------- LR schedule (linear warmup + cosine decay) ----------
@@ -100,20 +101,22 @@ class Trainer:
 
     # ---------- per-sample loss ----------
 
-    def _sample_loss(self, sample: dict) -> torch.Tensor:
+    def _sample_loss_and_backward(self, sample: dict, scale: float) -> float:
         feedback_ids = sample["feedback_ids"].unsqueeze(0).to(self.device)
         feedback_mask = sample["feedback_mask"].unsqueeze(0).to(self.device)
 
         lora = self.hypernetwork(feedback_ids, feedback_mask)
 
         queries = [sample["query"]] + list(sample["related_queries"])
-        loss = torch.zeros((), device=self.device)
-        for q in queries:
+        total = 0.0
+        for i, q in enumerate(queries):
             s_logits = self.target.student_forward(q, lora)
             t_logits = self.target.teacher_forward(q, sample["feedback"])
-            # Align lengths: compare last token only (kl_distillation_loss does this).
-            loss = loss + kl_distillation_loss(s_logits, t_logits)
-        return loss / len(queries)
+            loss = kl_distillation_loss(s_logits, t_logits) * scale / len(queries)
+            # retain_graph keeps lora graph alive across queries; free on last query
+            loss.backward(retain_graph=(i < len(queries) - 1))
+            total += loss.item()
+        return total
 
     # ---------- step ----------
 
@@ -123,9 +126,7 @@ class Trainer:
         accum = self.config.gradient_accumulation_steps
         total = 0.0
         for sample in batch["samples"]:
-            loss = self._sample_loss(sample) / accum
-            loss.backward()
-            total += loss.item()
+            total += self._sample_loss_and_backward(sample, scale=1.0 / accum)
         torch.nn.utils.clip_grad_norm_(self.hypernetwork.parameters(), self.config.max_grad_norm)
         self._set_lr()
         self.optimizer.step()
@@ -138,7 +139,18 @@ class Trainer:
         losses: list[float] = []
         for batch in self.val_loader:
             for sample in batch["samples"]:
-                losses.append(self._sample_loss(sample).item())
+                feedback_ids = sample["feedback_ids"].unsqueeze(0).to(self.device)
+                feedback_mask = sample["feedback_mask"].unsqueeze(0).to(self.device)
+                lora = self.hypernetwork(feedback_ids, feedback_mask)
+                queries = [sample["query"]] + list(sample["related_queries"])
+                loss = sum(
+                    kl_distillation_loss(
+                        self.target.student_forward(q, lora),
+                        self.target.teacher_forward(q, sample["feedback"]),
+                    )
+                    for q in queries
+                ) / len(queries)
+                losses.append(loss.item())
         return sum(losses) / max(1, len(losses))
 
     # ---------- main loop ----------
