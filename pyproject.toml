@@ -20,6 +20,7 @@ dependencies = [
     "openai",
     "pyyaml",
     "tqdm",
+    "wandb",
     "matplotlib",
     "numpy",
 ]

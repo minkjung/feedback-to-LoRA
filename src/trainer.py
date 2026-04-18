@@ -70,6 +70,17 @@ class Trainer:
         self.patience = 0
         self.global_step = 0
 
+        try:
+            import wandb
+            import os
+            if os.environ.get("WANDB_API_KEY"):
+                wandb.init(project="feedback-to-lora", config=vars(config))
+                self.wandb = wandb
+            else:
+                self.wandb = None
+        except ImportError:
+            self.wandb = None
+
     # ---------- LR schedule (linear warmup + cosine decay) ----------
 
     def _lr_scale(self, step: int) -> float:
@@ -137,15 +148,22 @@ class Trainer:
                 history["train"].append(loss)
                 pbar.set_postfix(loss=f"{loss:.4f}")
 
+                if self.wandb:
+                    self.wandb.log({"train/loss": loss, "step": self.global_step})
+
                 if self.global_step % self.config.eval_every_steps == 0:
                     val_loss = self.validate()
                     history["val"].append(val_loss)
+                    if self.wandb:
+                        self.wandb.log({"val/loss": val_loss, "step": self.global_step})
                     self._maybe_checkpoint(val_loss)
                     if self.patience >= self.config.early_stopping_patience:
                         return history
 
             val_loss = self.validate()
             history["val"].append(val_loss)
+            if self.wandb:
+                self.wandb.log({"val/loss": val_loss, "epoch": epoch, "step": self.global_step})
             self._maybe_checkpoint(val_loss)
             if self.patience >= self.config.early_stopping_patience:
                 return history
