@@ -22,14 +22,65 @@ from src.hypernetwork import FeedbackToLoRA
 from src.perceiver import PerceiverToLoRA
 from src.target_model import TargetModel
 
+HF_CKPT_REPO = "james-kernel/feedback-to-lora-checkpoints"
+HF_RESULTS_REPO = "james-kernel/feedback-to-lora-results"
+HF_DATA_REPO = "james-kernel/feedback-to-lora-step1"
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--config", default="configs/config.yaml")
-    p.add_argument("--checkpoint", default=None, help="Path to ours/best.pt (defaults to checkpoint_dir/best.pt)")
+    p.add_argument("--checkpoint", default=None,
+                   help="Path to ours/best.pt. If omitted, downloads best_light.pt from HF.")
     p.add_argument("--d2l-checkpoint", default=None, help="Path to Perceiver baseline checkpoint")
     p.add_argument("--device", default="cuda")
+    p.add_argument("--exp-id", default=None,
+                   help="experiment id, used to tag results on HF")
+    p.add_argument("--no-upload", action="store_true",
+                   help="skip uploading results to HF hub")
     return p.parse_args()
+
+
+def ensure_checkpoint(local_path: Path | None) -> Path:
+    if local_path and local_path.exists():
+        return local_path
+    from huggingface_hub import hf_hub_download
+    path = hf_hub_download(HF_CKPT_REPO, filename="best_light.pt", repo_type="model")
+    print(f"[ckpt] downloaded best_light.pt from {HF_CKPT_REPO} -> {path}")
+    return Path(path)
+
+
+def ensure_test_split(cfg: dict) -> None:
+    dest = resolve(cfg["paths"]["test_split"])
+    if dest.exists():
+        return
+    from huggingface_hub import hf_hub_download
+    import shutil
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    path = hf_hub_download(HF_DATA_REPO, filename="test.jsonl", repo_type="dataset")
+    shutil.copy(path, dest)
+    print(f"[data] downloaded test.jsonl -> {dest}")
+
+
+def upload_results(out_dir: Path, exp_id: str | None) -> None:
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        api.create_repo(HF_RESULTS_REPO, repo_type="dataset", exist_ok=True)
+        prefix = f"{exp_id}/" if exp_id else ""
+        for fname in ("eval_summary.json", "eval_per_sample.jsonl"):
+            fp = out_dir / fname
+            if not fp.exists():
+                continue
+            api.upload_file(
+                path_or_fileobj=str(fp),
+                path_in_repo=f"{prefix}{fname}",
+                repo_id=HF_RESULTS_REPO,
+                repo_type="dataset",
+            )
+            print(f"[hub] uploaded {fname} -> {HF_RESULTS_REPO}/{prefix}{fname}")
+    except Exception as e:
+        print(f"[hub] upload failed (non-fatal): {e}")
 
 
 def main() -> None:
@@ -52,12 +103,13 @@ def main() -> None:
         output_scale=cfg["lora_output_scale"],
         dtype=torch.bfloat16,
     )
-    ckpt_path = Path(args.checkpoint) if args.checkpoint else (
-        resolve(cfg["paths"]["checkpoint_dir"]) / "best.pt"
-    )
+    ckpt_path = ensure_checkpoint(Path(args.checkpoint) if args.checkpoint else None)
     state = torch.load(ckpt_path, map_location="cpu")
-    hypernetwork.load_state_dict(state["model"])
+    # strict=False because backbone.* keys are absent (frozen, reloaded from HF)
+    hypernetwork.load_state_dict(state["model"], strict=False)
     hypernetwork = hypernetwork.to(args.device)
+
+    ensure_test_split(cfg)
 
     d2l = None
     if args.d2l_checkpoint:
@@ -105,6 +157,9 @@ def main() -> None:
         for r in results.per_sample:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+    if not args.no_upload:
+        upload_results(out_dir, args.exp_id)
 
 
 if __name__ == "__main__":

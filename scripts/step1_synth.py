@@ -1,16 +1,13 @@
 """
 Step 1: Synthesize feedback dataset.
 
-Input:  data/processed/e4b_wrong_answers.jsonl
+Input:  HuggingFace Hub (james-kernel/feedback-to-lora-step0-checkpoint)
 Output: data/processed/feedback_dataset.jsonl
         data/splits/{train,val,test}.jsonl
 
-For each wrong answer, GPT-5 Nano produces:
-  1. correction feedback in K different styles (direct / conversational / terse / partial / multilingual)
+For each wrong answer, GPT generates:
+  1. correction feedback in K different styles
   2. N related queries that probe the same underlying fact
-
-Filter: drop rows where the gold answer leaks verbatim from the feedback being too literal
-(we want correction signal, not lookup); also drop empties.
 """
 
 from __future__ import annotations
@@ -19,6 +16,7 @@ import argparse
 import json
 import os
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from tqdm import tqdm
@@ -57,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--config", default="configs/config.yaml")
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--workers", type=int, default=20)
     return p.parse_args()
 
 
@@ -70,12 +69,50 @@ def call_openai(client, model: str, prompt: str) -> str:
 
 
 def gold_leak_filter(feedback: str, gold: str) -> bool:
-    """Reject if feedback merely echoes gold; we still want gold inside, but not be only gold."""
     if not feedback.strip():
         return False
     if len(feedback.strip()) < len(gold.strip()) + 2:
         return False
     return True
+
+
+def process_item(client, model, item, styles, augment_factor, n_related, rng_seed):
+    rng = random.Random(rng_seed)
+    query = item["query"]
+    gold = item["gold"]
+    wrong = item["model_answer"]
+    rows = []
+
+    try:
+        rq_text = call_openai(client, model, RELATED_QUERIES_PROMPT.format(query=query, gold=gold, n=n_related))
+        related_queries = json.loads(rq_text)
+        if not isinstance(related_queries, list):
+            related_queries = []
+    except Exception:
+        related_queries = []
+
+    chosen_styles = rng.choices(styles, k=augment_factor)
+    for style in chosen_styles:
+        try:
+            fb = call_openai(client, model, FEEDBACK_PROMPT.format(
+                wrong=wrong, gold=gold, query=query,
+                style_desc=STYLE_DESCRIPTIONS[style],
+            ))
+        except Exception:
+            continue
+        if not gold_leak_filter(fb, gold):
+            continue
+        rows.append({
+            "question_id": item.get("question_id"),
+            "query": query,
+            "gold": gold,
+            "wrong": wrong,
+            "feedback": fb,
+            "feedback_style": style,
+            "related_queries": related_queries,
+        })
+
+    return rows
 
 
 def main() -> None:
@@ -92,73 +129,48 @@ def main() -> None:
 
     client = OpenAI()
 
-    in_path = resolve(cfg["paths"]["e4b_wrong_answers"])
     out_path = resolve(cfg["paths"]["feedback_dataset"])
-    items = load_jsonl(in_path)
+
+    from huggingface_hub import hf_hub_download
+    ckpt = hf_hub_download(
+        repo_id="james-kernel/feedback-to-lora-step0-checkpoint",
+        filename="checkpoint.jsonl",
+        repo_type="dataset",
+    )
+    all_items = load_jsonl(Path(ckpt))
+    items = [r for r in all_items if r.get("is_wrong")]
+    print(f"loaded {len(items)} wrong-answer items from HF hub")
+
     if args.limit:
         items = items[: args.limit]
-    print(f"loaded {len(items)} wrong-answer items")
 
     styles = cfg["feedback_styles"]
     augment_factor = cfg["feedback_augment_factor"]
     n_related = cfg["num_related_queries"]
     api_model = cfg["synth_api_model"]
+    seed = cfg["seed"]
 
-    rng = random.Random(cfg["seed"])
     rows: list[dict] = []
 
-    for item in tqdm(items, desc="synth"):
-        query = item["query"]
-        gold = item["gold"]
-        wrong = item["model_answer"]
-
-        # related queries (one batch per fact)
-        try:
-            rq_text = call_openai(
-                client, api_model,
-                RELATED_QUERIES_PROMPT.format(query=query, gold=gold, n=n_related),
-            )
-            related_queries = json.loads(rq_text)
-            if not isinstance(related_queries, list):
-                related_queries = []
-        except Exception as e:
-            print(f"related queries failed: {e}")
-            related_queries = []
-
-        # feedback per style, repeated augment_factor times
-        chosen_styles = rng.choices(styles, k=augment_factor)
-        for style in chosen_styles:
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = {
+            executor.submit(process_item, client, api_model, item, styles, augment_factor, n_related, seed + i): i
+            for i, item in enumerate(items)
+        }
+        for future in tqdm(as_completed(futures), total=len(futures), desc="synth"):
             try:
-                fb = call_openai(
-                    client, api_model,
-                    FEEDBACK_PROMPT.format(
-                        wrong=wrong, gold=gold, query=query,
-                        style_desc=STYLE_DESCRIPTIONS[style],
-                    ),
-                )
+                rows.extend(future.result())
             except Exception as e:
-                print(f"feedback failed: {e}")
-                continue
-            if not gold_leak_filter(fb, gold):
-                continue
-            rows.append({
-                "question_id": item.get("question_id"),
-                "query": query,
-                "gold": gold,
-                "wrong": wrong,
-                "feedback": fb,
-                "feedback_style": style,
-                "related_queries": related_queries,
-            })
+                print(f"item failed: {e}")
 
     write_jsonl(out_path, rows)
     print(f"wrote {len(rows)} feedback rows -> {out_path}")
 
-    # split (group by question_id so train/test don't share facts)
     by_qid: dict[str, list[dict]] = {}
     for r in rows:
         by_qid.setdefault(str(r["question_id"]), []).append(r)
     qids = list(by_qid.keys())
+    rng = random.Random(seed)
     rng.shuffle(qids)
 
     n = len(qids)
