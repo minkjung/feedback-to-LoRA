@@ -38,6 +38,8 @@ def parse_args() -> argparse.Namespace:
                    help="experiment id, used to tag results on HF")
     p.add_argument("--no-upload", action="store_true",
                    help="skip uploading results to HF hub")
+    p.add_argument("--lora-output-scale", type=float, default=None,
+                   help="override output_scale (use if checkpoint has no meta)")
     return p.parse_args()
 
 
@@ -108,13 +110,18 @@ def main() -> None:
     ckpt_path = ensure_checkpoint(Path(args.checkpoint) if args.checkpoint else None)
     state = torch.load(ckpt_path, map_location="cpu")
     projection_hidden = infer_projection_hidden(state)
-    print(f"[ckpt] projection_hidden={projection_hidden}")
+    meta = state.get("meta", {})
+    if args.lora_output_scale is not None:
+        output_scale = args.lora_output_scale
+    else:
+        output_scale = meta.get("output_scale", cfg["lora_output_scale"])
+    print(f"[ckpt] projection_hidden={projection_hidden} output_scale={output_scale}")
 
     hypernetwork = FeedbackToLoRA(
         backbone_name=cfg["hypernetwork_backbone"],
         spec=target.spec,
         projection_hidden=projection_hidden,
-        output_scale=cfg["lora_output_scale"],
+        output_scale=output_scale,
         dtype=torch.bfloat16,
     )
     # strict=False because backbone.* keys are absent (frozen, reloaded from HF)

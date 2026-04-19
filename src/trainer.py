@@ -232,11 +232,19 @@ class Trainer:
             if not k.startswith("backbone.")
         }
 
+    def _meta(self) -> dict:
+        return {
+            "output_scale": self.hypernetwork.output_scale,
+            "lora_rank": self.hypernetwork.spec.rank,
+            "lora_target_modules": list(self.hypernetwork.spec.target_modules),
+        }
+
     def _save(self, path: Path, epoch: int, val_loss: float | None = None) -> None:
         """Full local checkpoint: model + optimizer for exact resume."""
         torch.save(
             {
                 "model": self._trainable_state(),
+                "meta": self._meta(),
                 "optimizer": self.optimizer.state_dict(),
                 "step": self.global_step,
                 "epoch": epoch,
@@ -253,6 +261,7 @@ class Trainer:
         torch.save(
             {
                 "model": self._trainable_state(),
+                "meta": self._meta(),
                 "step": self.global_step,
                 "epoch": epoch,
                 "val_loss": val_loss,
