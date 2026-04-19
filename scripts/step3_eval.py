@@ -41,6 +41,14 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def infer_projection_hidden(state: dict) -> int:
+    """Projection head shape is (projection_hidden, backbone_hidden). Read first dim."""
+    for k, v in state["model"].items():
+        if k.endswith(".0.weight") and k.startswith("projections."):
+            return v.shape[0]
+    raise ValueError("could not infer projection_hidden from checkpoint")
+
+
 def ensure_checkpoint(local_path: Path | None) -> Path:
     if local_path and local_path.exists():
         return local_path
@@ -97,14 +105,18 @@ def main() -> None:
     if hn_tokenizer.pad_token_id is None:
         hn_tokenizer.pad_token = hn_tokenizer.eos_token
 
+    ckpt_path = ensure_checkpoint(Path(args.checkpoint) if args.checkpoint else None)
+    state = torch.load(ckpt_path, map_location="cpu")
+    projection_hidden = infer_projection_hidden(state)
+    print(f"[ckpt] projection_hidden={projection_hidden}")
+
     hypernetwork = FeedbackToLoRA(
         backbone_name=cfg["hypernetwork_backbone"],
         spec=target.spec,
+        projection_hidden=projection_hidden,
         output_scale=cfg["lora_output_scale"],
         dtype=torch.bfloat16,
     )
-    ckpt_path = ensure_checkpoint(Path(args.checkpoint) if args.checkpoint else None)
-    state = torch.load(ckpt_path, map_location="cpu")
     # strict=False because backbone.* keys are absent (frozen, reloaded from HF)
     hypernetwork.load_state_dict(state["model"], strict=False)
     hypernetwork = hypernetwork.to(args.device)
