@@ -73,6 +73,8 @@ def parse_args() -> argparse.Namespace:
                    help="override learning_rate")
     p.add_argument("--lora-rank", type=int, default=None,
                    help="override lora_rank")
+    p.add_argument("--projection-hidden", type=int, default=128,
+                   help="hypernetwork projection head hidden size (default 128)")
     return p.parse_args()
 
 
@@ -124,6 +126,7 @@ def main() -> None:
     hypernetwork = FeedbackToLoRA(
         backbone_name=cfg["hypernetwork_backbone"],
         spec=target.spec,
+        projection_hidden=args.projection_hidden,
         output_scale=cfg["lora_output_scale"],
         dtype=torch.bfloat16,
     ).to(args.device)
@@ -167,8 +170,7 @@ def main() -> None:
     try:
         trainer.fit()
         print(f"done. best val loss: {trainer.best_val:.4f}")
-        ckpt_path = Path(train_cfg.checkpoint_dir) / "best.pt"
-        upload_checkpoint(ckpt_path)
+        # best_light.pt already uploaded to HF by _maybe_checkpoint; no duplicate upload here
         should_stop = True  # normal completion
     except KeyboardInterrupt:
         print("\n[autostop] Ctrl+C detected, instance will stay alive")
