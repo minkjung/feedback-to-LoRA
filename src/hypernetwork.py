@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from transformers import AutoModel
+from transformers import AutoModelForCausalLM
 
 from .lora_utils import LoRASpec
 
@@ -27,23 +27,29 @@ class FeedbackToLoRA(nn.Module):
         self.spec = spec
         self.output_scale = output_scale
 
-        self.backbone = AutoModel.from_pretrained(backbone_name, dtype=dtype)
+        full = AutoModelForCausalLM.from_pretrained(backbone_name, dtype=dtype)
+        # For multimodal Gemma 4: full is Gemma4ForConditionalGeneration,
+        # full.model is Gemma4Model (multimodal wrapper), and the text encoder
+        # lives at full.model.language_model (a Gemma4TextModel).
+        # For a pure-text config: fall back to full.model (a Gemma4TextModel).
+        base = full.model
+        self.backbone = getattr(base, "language_model", base)
         for p in self.backbone.parameters():
             p.requires_grad = False
-        cfg = self.backbone.config
-        backbone_hidden = getattr(cfg, "hidden_size", None) or cfg.text_config.hidden_size
+        cfg = full.config
+        text_cfg = getattr(cfg, "text_config", cfg)
+        backbone_hidden = text_cfg.hidden_size
 
         self.projections = nn.ModuleDict()
-        for i in range(spec.num_layers):
-            for m in spec.target_modules:
-                in_dim = spec.target_hidden_dims[m]
-                out_dim = spec.target_out_dims[m]
-                proj_out = spec.rank * in_dim + spec.rank * out_dim  # A: (rank, in), B: (out, rank)
-                self.projections[f"layer_{i}_{m}"] = nn.Sequential(
-                    nn.Linear(backbone_hidden, projection_hidden),
-                    nn.GELU(),
-                    nn.Linear(projection_hidden, proj_out),
-                ).to(dtype)
+        for key in spec.layer_module_keys():
+            in_dim = spec.per_layer_in[key]
+            out_dim = spec.per_layer_out[key]
+            proj_out = spec.rank * in_dim + spec.rank * out_dim  # A: (rank, in), B: (out, rank)
+            self.projections[key] = nn.Sequential(
+                nn.Linear(backbone_hidden, projection_hidden),
+                nn.GELU(),
+                nn.Linear(projection_hidden, proj_out),
+            ).to(dtype)
 
     def forward(
         self,
@@ -66,13 +72,10 @@ class FeedbackToLoRA(nn.Module):
         lora_weights: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         rank = self.spec.rank
         for key, proj in self.projections.items():
-            # keys are "layer_{i}_{module}", and module may itself contain '_' (e.g. q_proj)
-            parts = key.split("_", 2)
-            module_name = parts[2]
+            in_dim = self.spec.per_layer_in[key]
+            out_dim = self.spec.per_layer_out[key]
 
             ab = proj(rep) * self.output_scale
-            in_dim = self.spec.target_hidden_dims[module_name]
-            out_dim = self.spec.target_out_dims[module_name]
             half = rank * in_dim
             A_flat, B_flat = ab[:half], ab[half:]
             A = A_flat.view(rank, in_dim)

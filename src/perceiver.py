@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from transformers import AutoModel
+from transformers import AutoModelForCausalLM
 
 from .lora_utils import LoRASpec
 
@@ -82,12 +82,16 @@ class PerceiverToLoRA(nn.Module):
         self.spec = spec
         self.output_scale = output_scale
 
-        # Frozen token encoder for feedback hidden states
-        self.token_encoder = AutoModel.from_pretrained(token_encoder_name, dtype=dtype)
+        # Frozen token encoder for feedback hidden states.
+        # Gemma 4 / other multimodal configs: go through CausalLM wrapper then
+        # descend into the text-only submodule so pretrained weights actually load.
+        full = AutoModelForCausalLM.from_pretrained(token_encoder_name, dtype=dtype)
+        base = full.model
+        self.token_encoder = getattr(base, "language_model", base)
         for p in self.token_encoder.parameters():
             p.requires_grad = False
-        _cfg = self.token_encoder.config
-        kv_dim = getattr(_cfg, "hidden_size", None) or _cfg.text_config.hidden_size
+        text_cfg = getattr(full.config, "text_config", full.config)
+        kv_dim = text_cfg.hidden_size
 
         self.latents = nn.Parameter(torch.randn(num_latents, latent_dim) * 0.02)
         self.cross_attn = CrossAttentionBlock(latent_dim, kv_dim, num_heads, ff_dim)
@@ -96,16 +100,15 @@ class PerceiverToLoRA(nn.Module):
         )
 
         self.projections = nn.ModuleDict()
-        for i in range(spec.num_layers):
-            for m in spec.target_modules:
-                in_dim = spec.target_hidden_dims[m]
-                out_dim = spec.target_out_dims[m]
-                proj_out = spec.rank * in_dim + spec.rank * out_dim
-                self.projections[f"layer_{i}_{m}"] = nn.Sequential(
-                    nn.Linear(latent_dim, projection_hidden),
-                    nn.GELU(),
-                    nn.Linear(projection_hidden, proj_out),
-                )
+        for key in spec.layer_module_keys():
+            in_dim = spec.per_layer_in[key]
+            out_dim = spec.per_layer_out[key]
+            proj_out = spec.rank * in_dim + spec.rank * out_dim
+            self.projections[key] = nn.Sequential(
+                nn.Linear(latent_dim, projection_hidden),
+                nn.GELU(),
+                nn.Linear(projection_hidden, proj_out),
+            )
 
     def forward(
         self,
@@ -131,10 +134,8 @@ class PerceiverToLoRA(nn.Module):
         lora_weights: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         rank = self.spec.rank
         for key, proj in self.projections.items():
-            parts = key.split("_", 2)
-            module_name = parts[2]
-            in_dim = self.spec.target_hidden_dims[module_name]
-            out_dim = self.spec.target_out_dims[module_name]
+            in_dim = self.spec.per_layer_in[key]
+            out_dim = self.spec.per_layer_out[key]
 
             ab = proj(rep) * self.output_scale
             half = rank * in_dim

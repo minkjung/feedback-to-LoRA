@@ -11,18 +11,20 @@ from torch import nn
 
 @dataclass
 class LoRASpec:
-    """Static description of LoRA shape across all target layers."""
+    """Per-layer LoRA shape description. Gemma 4 mixes local/global attention
+    with different q_proj dims, so dims must be tracked per (layer, module)."""
 
     num_layers: int
     target_modules: list[str]
     rank: int
-    target_hidden_dims: dict[str, int]   # module name -> in_features  (reference: layer 0)
-    target_out_dims: dict[str, int]      # module name -> out_features (reference: layer 0)
+    per_layer_in: dict[str, int]   # "layer_{i}_{module}" -> in_features
+    per_layer_out: dict[str, int]  # "layer_{i}_{module}" -> out_features
 
     def layer_module_keys(self) -> list[str]:
-        return [
-            f"layer_{i}_{m}" for i in range(self.num_layers) for m in self.target_modules
-        ]
+        return list(self.per_layer_in.keys())
+
+    def key(self, layer_idx: int, module_name: str) -> str:
+        return f"layer_{layer_idx}_{module_name}"
 
 
 def build_lora_spec(target_model: nn.Module, target_modules: list[str], rank: int) -> LoRASpec:
@@ -30,21 +32,27 @@ def build_lora_spec(target_model: nn.Module, target_modules: list[str], rank: in
     layers = _find_decoder_layers(base)
     num_layers = len(layers)
 
-    in_dims: dict[str, int] = {}
-    out_dims: dict[str, int] = {}
-    for m in target_modules:
-        linear = _find_named_linear(layers[0], m)
-        if linear is None:
-            raise ValueError(f"Could not find linear `{m}` in decoder layer 0.")
-        in_dims[m] = linear.in_features
-        out_dims[m] = linear.out_features
+    per_layer_in: dict[str, int] = {}
+    per_layer_out: dict[str, int] = {}
+    for i, layer in enumerate(layers):
+        for m in target_modules:
+            linear = _find_named_linear(layer, m)
+            if linear is None:
+                # some layers may legitimately lack a module (rare); skip silently
+                continue
+            key = f"layer_{i}_{m}"
+            per_layer_in[key] = linear.in_features
+            per_layer_out[key] = linear.out_features
+
+    if not per_layer_in:
+        raise ValueError("build_lora_spec found no target linears in any decoder layer")
 
     return LoRASpec(
         num_layers=num_layers,
         target_modules=list(target_modules),
         rank=rank,
-        target_hidden_dims=in_dims,
-        target_out_dims=out_dims,
+        per_layer_in=per_layer_in,
+        per_layer_out=per_layer_out,
     )
 
 
@@ -85,11 +93,7 @@ def lora_applied(
     spec: LoRASpec,
     lora_weights: dict[str, tuple[torch.Tensor, torch.Tensor]],
 ):
-    """
-    Context manager: patch each target Linear with a LoRA delta.
-    Layers whose actual dims differ from the reference dims are skipped silently —
-    Gemma 4 has mixed local/global attention layers with different q_proj sizes.
-    """
+    """Context manager: patch each target Linear with a LoRA delta."""
     base = getattr(target_model, "model", target_model)
     layers = _find_decoder_layers(base)
 
@@ -103,11 +107,13 @@ def lora_applied(
                 key = f"layer_{i}_{m}"
                 if key not in lora_weights:
                     continue
-                # Skip layers with non-matching dims (e.g. global vs local attn in Gemma 4)
-                if (linear.in_features != spec.target_hidden_dims[m] or
-                        linear.out_features != spec.target_out_dims[m]):
-                    continue
                 A, B = lora_weights[key]
+                if A.shape[-1] != linear.in_features or B.shape[0] != linear.out_features:
+                    raise ValueError(
+                        f"LoRA shape mismatch at {key}: "
+                        f"A={tuple(A.shape)} B={tuple(B.shape)} vs "
+                        f"linear in={linear.in_features} out={linear.out_features}"
+                    )
                 _patch_linear(linear, A, B, handles)
         yield
     finally:
