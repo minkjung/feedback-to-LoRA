@@ -40,6 +40,8 @@ def parse_args() -> argparse.Namespace:
                    help="skip uploading results to HF hub")
     p.add_argument("--lora-output-scale", type=float, default=None,
                    help="override output_scale (use if checkpoint has no meta)")
+    p.add_argument("--limit", type=int, default=None,
+                   help="evaluate only the first N samples (quick sanity check)")
     return p.parse_args()
 
 
@@ -152,6 +154,9 @@ def main() -> None:
         max_feedback_length=cfg["max_feedback_length"],
         num_related_queries=cfg["num_related_queries"],
     )
+    if args.limit is not None:
+        test_ds = torch.utils.data.Subset(test_ds, list(range(min(args.limit, len(test_ds)))))
+        print(f"[eval] limited to first {len(test_ds)} samples")
 
     evaluator = Evaluator(
         hypernetwork=hypernetwork,
