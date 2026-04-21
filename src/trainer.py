@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from .dataset import FeedbackDataset, collate_singletons
 from .hypernetwork import FeedbackToLoRA
-from .losses import kl_distillation_loss
+from .losses import kl_sequence_loss
 from .target_model import TargetModel
 
 
@@ -145,14 +145,20 @@ class Trainer:
 
         queries = [sample["query"]] + list(sample["related_queries"])
         total = 0.0
+        counted = 0
         for i, q in enumerate(queries):
-            s_logits = self.target.student_forward(q, lora)
-            t_logits = self.target.teacher_forward(q, sample["feedback"])
-            kl = kl_distillation_loss(s_logits, t_logits)
+            # Teacher greedily generates the target answer (no grad); student is
+            # teacher-forced on that answer and must match teacher's per-position
+            # logits (multi-token KL instead of last-token-only).
+            trace = self.target.teacher_generate_and_score(q, sample["feedback"])
+            if trace.answer_ids.numel() == 0:
+                continue
+            s_logits = self.target.student_score_answer(trace, lora)
+            kl = kl_sequence_loss(s_logits, trace.answer_logits)
             (kl * scale / len(queries)).backward(retain_graph=(i < len(queries) - 1))
-            # Report raw per-query KL (unscaled) so train/loss matches val/loss scale
-            total += kl.item() / len(queries)
-        return total
+            total += kl.item()
+            counted += 1
+        return total / max(1, counted)
 
     # ---------- step ----------
 
@@ -179,14 +185,15 @@ class Trainer:
                 feedback_mask = sample["feedback_mask"].unsqueeze(0).to(self.device)
                 lora = self.hypernetwork(feedback_ids, feedback_mask)
                 queries = [sample["query"]] + list(sample["related_queries"])
-                loss = sum(
-                    kl_distillation_loss(
-                        self.target.student_forward(q, lora),
-                        self.target.teacher_forward(q, sample["feedback"]),
-                    )
-                    for q in queries
-                ) / len(queries)
-                losses.append(loss.item())
+                per_query = []
+                for q in queries:
+                    trace = self.target.teacher_generate_and_score(q, sample["feedback"])
+                    if trace.answer_ids.numel() == 0:
+                        continue
+                    s_logits = self.target.student_score_answer(trace, lora)
+                    per_query.append(kl_sequence_loss(s_logits, trace.answer_logits).item())
+                if per_query:
+                    losses.append(sum(per_query) / len(per_query))
         return sum(losses) / max(1, len(losses))
 
     # ---------- main loop ----------

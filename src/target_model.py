@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .lora_utils import LoRASpec, build_lora_spec, lora_applied, lora_merged
+
+
+@dataclass
+class TeacherTrace:
+    """Output of teacher_generate_and_score: the teacher's answer tokens and
+    its logits at every answer position (for distillation)."""
+    prompt_ids: torch.Tensor          # (1, P)  query-only student prompt ids
+    answer_ids: torch.Tensor          # (A,)    teacher-generated answer tokens
+    answer_logits: torch.Tensor       # (A, V)  teacher logits at each answer position
 
 
 class TargetModel:
@@ -49,7 +60,86 @@ class TargetModel:
         ]
         return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
-    # ---------- forward (returns logits) ----------
+    # ---------- distillation training ops ----------
+
+    @torch.no_grad()
+    def teacher_generate_and_score(
+        self,
+        query: str,
+        feedback: str,
+        max_new_tokens: int = 32,
+    ) -> TeacherTrace:
+        """Teacher sees feedback+query, greedily generates an answer, and returns
+        the answer token ids plus teacher logits at every answer position.
+
+        The returned prompt_ids is the *student* prompt (query without feedback),
+        used later for teacher-forcing the student."""
+        device = self.device
+
+        teacher_prompt = self._format_query_with_feedback(query, feedback)
+        teacher_inputs = self.tokenizer(teacher_prompt, return_tensors="pt").to(device)
+        out = self.model.generate(
+            **teacher_inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            return_dict_in_generate=True,
+            output_scores=True,
+        )
+        # scores: tuple of (1, V) per generated token (post-processed logits)
+        # sequences: (1, P_t + A)
+        P_t = teacher_inputs["input_ids"].shape[1]
+        sequences = out.sequences
+        answer_ids = sequences[0, P_t:]                              # (A,)
+        # out.scores[i] is logits for answer_ids[i]
+        answer_logits = torch.stack(list(out.scores), dim=0).squeeze(1)  # (A, V)
+
+        # Drop trailing EOS/pad tokens so we only distill real answer content.
+        eos = self.tokenizer.eos_token_id
+        pad = self.tokenizer.pad_token_id
+        keep = []
+        for i, tok in enumerate(answer_ids.tolist()):
+            if tok in (eos, pad):
+                break
+            keep.append(i)
+        if keep:
+            answer_ids = answer_ids[keep]
+            answer_logits = answer_logits[keep]
+
+        student_prompt = self._format_query(query)
+        student_prompt_ids = self.tokenizer(student_prompt, return_tensors="pt").input_ids.to(device)
+
+        return TeacherTrace(
+            prompt_ids=student_prompt_ids,
+            answer_ids=answer_ids.to(device),
+            answer_logits=answer_logits.to(device),
+        )
+
+    def student_score_answer(
+        self,
+        trace: TeacherTrace,
+        lora_weights: dict[str, tuple[torch.Tensor, torch.Tensor]],
+    ) -> torch.Tensor:
+        """Teacher-force the student on prompt+answer and return student logits
+        at every answer position, shape (A, V). Gradients flow through lora_weights."""
+        if trace.answer_ids.numel() == 0:
+            return torch.empty(0, self.model.config.text_config.vocab_size if hasattr(self.model.config, 'text_config') else self.model.config.vocab_size, device=self.device)
+
+        prompt_ids = trace.prompt_ids                     # (1, P)
+        answer_ids = trace.answer_ids.unsqueeze(0)        # (1, A)
+        input_ids = torch.cat([prompt_ids, answer_ids], dim=1)  # (1, P+A)
+        attention_mask = torch.ones_like(input_ids)
+
+        with lora_applied(self.model, self.spec, lora_weights):
+            out = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        logits = out.logits  # (1, P+A, V)
+
+        # Student logits that predict answer_ids[i] live at position P-1+i.
+        P = prompt_ids.shape[1]
+        A = answer_ids.shape[1]
+        answer_logits = logits[0, P - 1 : P - 1 + A, :]  # (A, V)
+        return answer_logits
+
+    # ---------- legacy eval APIs ----------
 
     def teacher_forward(self, query: str, feedback: str) -> torch.Tensor:
         prompt = self._format_query_with_feedback(query, feedback)
@@ -83,14 +173,13 @@ class TargetModel:
         if lora_weights is None:
             output = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
         else:
-            # lora_merged folds LoRA into W for no per-forward Python overhead
             with lora_merged(self.model, self.spec, lora_weights):
                 output = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
         new_tokens = output[0, inputs["input_ids"].shape[1]:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
     @torch.no_grad()
-    def generate_with_context(self, query: str, feedback: str, max_new_tokens: int = 128) -> str:
+    def generate_with_context(self, query: str, feedback: str, max_new_tokens: int = 32) -> str:
         prompt = self._format_query_with_feedback(query, feedback)
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         output = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
