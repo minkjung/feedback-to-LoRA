@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .lora_utils import LoRASpec, build_lora_spec, lora_applied
+from .lora_utils import LoRASpec, build_lora_spec, lora_applied, lora_merged
 
 
 class TargetModel:
@@ -83,7 +83,8 @@ class TargetModel:
         if lora_weights is None:
             output = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
         else:
-            with lora_applied(self.model, self.spec, lora_weights):
+            # lora_merged folds LoRA into W for no per-forward Python overhead
+            with lora_merged(self.model, self.spec, lora_weights):
                 output = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
         new_tokens = output[0, inputs["input_ids"].shape[1]:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()

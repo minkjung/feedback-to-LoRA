@@ -140,3 +140,43 @@ def _patch_linear(
 
     linear.forward = patched  # type: ignore[assignment]
     handles.append((linear, original_forward))
+
+
+@contextmanager
+def lora_merged(
+    target_model: nn.Module,
+    spec: LoRASpec,
+    lora_weights: dict[str, tuple[torch.Tensor, torch.Tensor]],
+):
+    """Inference-only fast path: merge LoRA delta into the Linear weight
+    for the duration of the context, then subtract it back out. No per-forward
+    Python overhead (unlike lora_applied which patches .forward)."""
+    base = getattr(target_model, "model", target_model)
+    layers = _find_decoder_layers(base)
+
+    merged: list[tuple[nn.Linear, torch.Tensor]] = []
+    try:
+        with torch.no_grad():
+            for i, layer in enumerate(layers):
+                for m in spec.target_modules:
+                    linear = _find_named_linear(layer, m)
+                    if linear is None:
+                        continue
+                    key = f"layer_{i}_{m}"
+                    if key not in lora_weights:
+                        continue
+                    A, B = lora_weights[key]
+                    if A.shape[-1] != linear.in_features or B.shape[0] != linear.out_features:
+                        raise ValueError(
+                            f"LoRA shape mismatch at {key}: "
+                            f"A={tuple(A.shape)} B={tuple(B.shape)} vs "
+                            f"linear in={linear.in_features} out={linear.out_features}"
+                        )
+                    delta = (B.to(linear.weight.dtype) @ A.to(linear.weight.dtype)).to(linear.weight.device)
+                    linear.weight.data.add_(delta)
+                    merged.append((linear, delta))
+        yield
+    finally:
+        with torch.no_grad():
+            for linear, delta in merged:
+                linear.weight.data.sub_(delta)
