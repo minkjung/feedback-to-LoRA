@@ -76,7 +76,7 @@ class TargetModel:
         self,
         query: str,
         lora_weights: dict[str, tuple[torch.Tensor, torch.Tensor]] | None = None,
-        max_new_tokens: int = 128,
+        max_new_tokens: int = 32,
     ) -> str:
         prompt = self._format_query(query)
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
