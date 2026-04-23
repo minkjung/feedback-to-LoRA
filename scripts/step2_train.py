@@ -154,6 +154,7 @@ def main() -> None:
         max_grad_norm=cfg["max_grad_norm"],
         eval_every_steps=cfg["eval_every_steps"],
         checkpoint_dir=str(resolve(cfg["paths"]["checkpoint_dir"])),
+        lora_l1_coef=cfg.get("lora_l1_coef", 0.0),
         **({"save_every_steps": args.save_every_steps} if args.save_every_steps else {}),
     )
 

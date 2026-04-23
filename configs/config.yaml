@@ -7,11 +7,9 @@ hypernetwork_backbone: "google/gemma-4-E2B-it"
 # LoRA
 lora_rank: 8
 lora_target_modules:
-  - q_proj
-  - v_proj
-  - up_proj
   - down_proj
-lora_output_scale: 0.01
+lora_output_scale: 1.0  # placeholder only; per-layer learnable alpha in hypernet is the real scale
+lora_l1_coef: 0.001     # L1 reg on generated A,B — prevents LoRA magnitude blow-up
 
 # Training
 learning_rate: 2.0e-5

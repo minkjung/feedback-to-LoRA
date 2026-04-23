@@ -46,9 +46,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def infer_projection_hidden(state: dict) -> int:
-    """Projection head shape is (projection_hidden, backbone_hidden). Read first dim."""
+    """Projection head first Linear shape is (projection_hidden, backbone_hidden)."""
     for k, v in state["model"].items():
-        if k.endswith(".0.weight") and k.startswith("projections."):
+        if k.endswith(".0.weight") and (
+            k.startswith("projections.") or k.startswith("proj_A.") or k.startswith("proj_B.")
+        ):
             return v.shape[0]
     raise ValueError("could not infer projection_hidden from checkpoint")
 

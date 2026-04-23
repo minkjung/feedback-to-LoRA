@@ -29,6 +29,7 @@ class TrainConfig:
     eval_every_steps: int
     checkpoint_dir: str
     save_every_steps: int = 200
+    lora_l1_coef: float = 0.0
 
 
 class Trainer:
@@ -144,21 +145,26 @@ class Trainer:
         lora = self.hypernetwork(feedback_ids, feedback_mask)
 
         queries = [sample["query"]] + list(sample["related_queries"])
-        total = 0.0
-        counted = 0
-        for i, q in enumerate(queries):
-            # Teacher greedily generates the target answer (no grad); student is
-            # teacher-forced on that answer and must match teacher's per-position
-            # logits (multi-token KL instead of last-token-only).
-            trace = self.target.teacher_generate_and_score(q, sample["feedback"])
-            if trace.answer_ids.numel() == 0:
-                continue
-            s_logits = self.target.student_score_answer(trace, lora)
-            kl = kl_sequence_loss(s_logits, trace.answer_logits)
-            (kl * scale / len(queries)).backward(retain_graph=(i < len(queries) - 1))
-            total += kl.item()
-            counted += 1
-        return total / max(1, counted)
+
+        # Collect all teacher traces first (no grad), then batch student forward.
+        traces = [self.target.teacher_generate_and_score(q, sample["feedback"]) for q in queries]
+        valid_traces = [t for t in traces if t.answer_ids.numel() > 0]
+        if not valid_traces:
+            return 0.0
+
+        s_logits_list = self.target.student_score_answer_batch(valid_traces, lora)
+
+        l1 = self.hypernetwork.generated_l1_norm()
+        l1_coef = getattr(self.config, "lora_l1_coef", 0.0)
+
+        total_kl = 0.0
+        n = len(valid_traces)
+        for i, (t, s_logits) in enumerate(zip(valid_traces, s_logits_list)):
+            kl = kl_sequence_loss(s_logits, t.answer_logits)
+            loss = kl / n + (l1_coef * l1 / n if l1_coef > 0 else 0.0)
+            (loss * scale).backward(retain_graph=(i < n - 1))
+            total_kl += kl.item()
+        return total_kl / n
 
     # ---------- step ----------
 
@@ -185,15 +191,13 @@ class Trainer:
                 feedback_mask = sample["feedback_mask"].unsqueeze(0).to(self.device)
                 lora = self.hypernetwork(feedback_ids, feedback_mask)
                 queries = [sample["query"]] + list(sample["related_queries"])
-                per_query = []
-                for q in queries:
-                    trace = self.target.teacher_generate_and_score(q, sample["feedback"])
-                    if trace.answer_ids.numel() == 0:
-                        continue
-                    s_logits = self.target.student_score_answer(trace, lora)
-                    per_query.append(kl_sequence_loss(s_logits, trace.answer_logits).item())
-                if per_query:
-                    losses.append(sum(per_query) / len(per_query))
+                traces = [self.target.teacher_generate_and_score(q, sample["feedback"]) for q in queries]
+                valid_traces = [t for t in traces if t.answer_ids.numel() > 0]
+                if not valid_traces:
+                    continue
+                s_logits_list = self.target.student_score_answer_batch(valid_traces, lora)
+                per_query = [kl_sequence_loss(s, t.answer_logits).item() for s, t in zip(s_logits_list, valid_traces)]
+                losses.append(sum(per_query) / len(per_query))
         return sum(losses) / max(1, len(losses))
 
     # ---------- main loop ----------

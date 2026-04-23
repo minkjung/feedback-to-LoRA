@@ -121,23 +121,53 @@ class TargetModel:
     ) -> torch.Tensor:
         """Teacher-force the student on prompt+answer and return student logits
         at every answer position, shape (A, V). Gradients flow through lora_weights."""
-        if trace.answer_ids.numel() == 0:
-            return torch.empty(0, self.model.config.text_config.vocab_size if hasattr(self.model.config, 'text_config') else self.model.config.vocab_size, device=self.device)
+        return self.student_score_answer_batch([trace], lora_weights)[0]
 
-        prompt_ids = trace.prompt_ids                     # (1, P)
-        answer_ids = trace.answer_ids.unsqueeze(0)        # (1, A)
-        input_ids = torch.cat([prompt_ids, answer_ids], dim=1)  # (1, P+A)
-        attention_mask = torch.ones_like(input_ids)
+    def student_score_answer_batch(
+        self,
+        traces: list[TeacherTrace],
+        lora_weights: dict[str, tuple[torch.Tensor, torch.Tensor]],
+    ) -> list[torch.Tensor]:
+        """Batched version: one forward pass for all traces. Returns list of (A_i, V) tensors."""
+        vocab_size = (
+            self.model.config.text_config.vocab_size
+            if hasattr(self.model.config, "text_config")
+            else self.model.config.vocab_size
+        )
+        empty = torch.empty(0, vocab_size, device=self.device)
+
+        valid = [(i, t) for i, t in enumerate(traces) if t.answer_ids.numel() > 0]
+        if not valid:
+            return [empty for _ in traces]
+
+        # Build padded batch: each row = [prompt_ids | answer_ids], left-pad to same length.
+        seqs = []
+        for _, t in valid:
+            seq = torch.cat([t.prompt_ids[0], t.answer_ids], dim=0)  # (P_i + A_i,)
+            seqs.append(seq)
+
+        max_len = max(s.shape[0] for s in seqs)
+        pad_id = self.tokenizer.pad_token_id
+        input_ids = torch.full((len(seqs), max_len), pad_id, dtype=torch.long, device=self.device)
+        attention_mask = torch.zeros(len(seqs), max_len, dtype=torch.long, device=self.device)
+        for row, seq in enumerate(seqs):
+            L = seq.shape[0]
+            input_ids[row, max_len - L :] = seq
+            attention_mask[row, max_len - L :] = 1
 
         with lora_applied(self.model, self.spec, lora_weights):
             out = self.model(input_ids=input_ids, attention_mask=attention_mask)
-        logits = out.logits  # (1, P+A, V)
+        logits = out.logits  # (B, max_len, V)
 
-        # Student logits that predict answer_ids[i] live at position P-1+i.
-        P = prompt_ids.shape[1]
-        A = answer_ids.shape[1]
-        answer_logits = logits[0, P - 1 : P - 1 + A, :]  # (A, V)
-        return answer_logits
+        results: list[torch.Tensor] = [empty for _ in traces]
+        for row, (orig_idx, t) in enumerate(valid):
+            P = t.prompt_ids.shape[1]
+            A = t.answer_ids.shape[0]
+            # Left-padded: answer starts at max_len - A, prompt answer boundary at max_len - A - 1
+            start = max_len - A - 1  # position that predicts answer_ids[0]
+            results[orig_idx] = logits[row, start : start + A, :]  # (A, V)
+
+        return results
 
     # ---------- legacy eval APIs ----------
 
