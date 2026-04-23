@@ -1,11 +1,22 @@
 """Gemma 4 E2B backbone + per-(layer, module) projection heads -> LoRA weights.
 
-Key stability tricks (adopted from Doc-to-LoRA, Sakana 2026):
-  - Separate projection heads for A and B matrices
-  - B head initialized to zero -> LoRA delta starts at 0 (no base-model disruption)
-  - Per-layer learnable scaling alpha (replaces fixed output_scale)
-  - L2-normalize pooled representation before projection
-  - generated_l1_norm() exposes A/B magnitudes for L1 regularization in the loss
+Architecture mirrors Sakana's Doc-to-LoRA (2026) gating trick:
+  A = bias_A + scaler_A * A_gen
+  B = bias_B + scaler_B * B_gen
+  delta = alpha * (B @ A)
+
+- bias_A: small random init  -> prior LoRA even before any feedback signal
+- bias_B: zero init            -> delta starts at 0 (base model untouched)
+- scaler_A: init 1             -> A active immediately
+- scaler_B: init 0             -> B gated off; only this tiny param has to move
+                                 for B_gen to start contributing
+- A_gen, B_gen: heads with Kaiming init (NOT zero) -> gradient flows freely
+- alpha: per-(layer, module) learnable, init 1
+
+This shape is critical: with a zero-init B head (our previous attempt), the
+entire gradient has to push a fat Linear out of 0 -- it can't. Here the only
+tiny parameter (scaler_B) that needs to move is 1-D, so gradient signal lands
+cleanly on it.
 """
 
 from __future__ import annotations
@@ -23,7 +34,7 @@ class FeedbackToLoRA(nn.Module):
         backbone_name: str,
         spec: LoRASpec,
         projection_hidden: int = 512,
-        output_scale: float = 1.0,  # kept for compat; effective scale is per-layer alpha
+        output_scale: float = 1.0,  # placeholder; per-(layer, module) alpha is the real scale
         dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
@@ -39,35 +50,44 @@ class FeedbackToLoRA(nn.Module):
         text_cfg = getattr(cfg, "text_config", cfg)
         backbone_hidden = text_cfg.hidden_size
 
-        # Separate A and B heads per (layer, module) so we can zero-init B only.
         self.proj_A = nn.ModuleDict()
         self.proj_B = nn.ModuleDict()
-        # Per-layer learnable alpha (replaces fixed output_scale). Init small.
+        self.bias_A = nn.ParameterDict()
+        self.bias_B = nn.ParameterDict()
+        self.scaler_A = nn.ParameterDict()
+        self.scaler_B = nn.ParameterDict()
         self.alpha = nn.ParameterDict()
 
+        rank = spec.rank
         for key in spec.layer_module_keys():
             in_dim = spec.per_layer_in[key]
             out_dim = spec.per_layer_out[key]
+            safe = _safe_key(key)
 
-            a_head = nn.Sequential(
+            # Heads produce A_gen (rank, in_dim) / B_gen (out_dim, rank) — standard init.
+            self.proj_A[safe] = nn.Sequential(
                 nn.Linear(backbone_hidden, projection_hidden),
                 nn.GELU(),
-                nn.Linear(projection_hidden, spec.rank * in_dim),
+                nn.Linear(projection_hidden, rank * in_dim),
             ).to(dtype)
-            b_head = nn.Sequential(
+            self.proj_B[safe] = nn.Sequential(
                 nn.Linear(backbone_hidden, projection_hidden),
                 nn.GELU(),
-                nn.Linear(projection_hidden, spec.rank * out_dim),
+                nn.Linear(projection_hidden, rank * out_dim),
             ).to(dtype)
 
-            # Zero-init the B head's final linear so LoRA delta starts at 0.
-            nn.init.zeros_(b_head[-1].weight)
-            nn.init.zeros_(b_head[-1].bias)
+            # Static bias per (layer, module). Shape: A=(rank,in_dim), B=(out_dim,rank).
+            # bias_A: small random so "initial LoRA" exists even with scaler_A=0.
+            std = 0.2 / (in_dim * rank) ** 0.5
+            self.bias_A[safe] = nn.Parameter(
+                torch.normal(0.0, std, size=(rank, in_dim), dtype=dtype)
+            )
+            self.bias_B[safe] = nn.Parameter(torch.zeros(out_dim, rank, dtype=dtype))
 
-            self.proj_A[_safe_key(key)] = a_head
-            self.proj_B[_safe_key(key)] = b_head
-            # alpha init: small positive so gradient can grow it. Fp32 for stable updates.
-            self.alpha[_safe_key(key)] = nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
+            # Learnable gates — fp32 for stable AdamW updates.
+            self.scaler_A[safe] = nn.Parameter(torch.ones((), dtype=torch.float32))
+            self.scaler_B[safe] = nn.Parameter(torch.zeros((), dtype=torch.float32))
+            self.alpha[safe] = nn.Parameter(torch.ones((), dtype=torch.float32))
 
         self._last_generated: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
@@ -81,37 +101,36 @@ class FeedbackToLoRA(nn.Module):
             attention_mask=attention_mask,
             output_hidden_states=False,
         )
-        hidden = outputs.last_hidden_state  # (B, T, D)
+        hidden = outputs.last_hidden_state
 
         mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
         representation = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-
-        # L2-normalize the pooled representation before projection heads (stabilizes head output).
         representation = representation / representation.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-
         rep = representation[0] if representation.dim() == 2 else representation
 
-        lora_weights: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         rank = self.spec.rank
+        lora_weights: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         for key in self.spec.layer_module_keys():
             in_dim = self.spec.per_layer_in[key]
             out_dim = self.spec.per_layer_out[key]
-
             safe = _safe_key(key)
-            a_flat = self.proj_A[safe](rep)
-            b_flat = self.proj_B[safe](rep)
 
-            alpha = self.alpha[safe].to(a_flat.dtype)
-            A = a_flat.view(rank, in_dim) * alpha
-            B = b_flat.view(out_dim, rank) * alpha
+            a_gen = self.proj_A[safe](rep).view(rank, in_dim)
+            b_gen = self.proj_B[safe](rep).view(out_dim, rank)
 
-            lora_weights[key] = (A, B)
+            sA = self.scaler_A[safe].to(a_gen.dtype)
+            sB = self.scaler_B[safe].to(b_gen.dtype)
+            a = self.bias_A[safe] + sA * a_gen
+            b = self.bias_B[safe] + sB * b_gen
+
+            alpha = self.alpha[safe].to(a.dtype)
+            lora_weights[key] = (alpha * a, alpha * b)
 
         self._last_generated = lora_weights
         return lora_weights
 
     def generated_l1_norm(self) -> torch.Tensor:
-        """Mean-per-module L1 norm of the last generated (A, B). Used as regularizer."""
+        """Mean L1 on generated (A,B). Keep very small so it doesn't choke scaler_B growth."""
         if not self._last_generated:
             return torch.zeros((), device=next(self.parameters()).device)
         total = None
@@ -124,6 +143,4 @@ class FeedbackToLoRA(nn.Module):
 
 
 def _safe_key(key: str) -> str:
-    # nn.ModuleDict / ParameterDict keys can't contain "."; our keys already don't,
-    # but keep a hook in case future keys include them.
     return key.replace(".", "_")

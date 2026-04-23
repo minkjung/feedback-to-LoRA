@@ -9,7 +9,7 @@ lora_rank: 8
 lora_target_modules:
   - down_proj
 lora_output_scale: 1.0  # placeholder only; per-layer learnable alpha in hypernet is the real scale
-lora_l1_coef: 0.001     # L1 reg on generated A,B — prevents LoRA magnitude blow-up
+lora_l1_coef: 0.0       # disabled: gate-based init already prevents blow-up; L1 suppresses scaler_B growth
 
 # Training
 learning_rate: 2.0e-5
