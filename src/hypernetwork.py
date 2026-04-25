@@ -85,8 +85,10 @@ class FeedbackToLoRA(nn.Module):
             self.bias_B[safe] = nn.Parameter(torch.zeros(out_dim, rank, dtype=dtype))
 
             # Learnable gates — fp32 for stable AdamW updates.
+            # scaler_B init=0.1 escapes the dead-zero region where gradients can't
+            # push a pure-zero scalar off 0 under batch=1 (validated in local mock).
             self.scaler_A[safe] = nn.Parameter(torch.ones((), dtype=torch.float32))
-            self.scaler_B[safe] = nn.Parameter(torch.zeros((), dtype=torch.float32))
+            self.scaler_B[safe] = nn.Parameter(torch.tensor(0.1, dtype=torch.float32))
             self.alpha[safe] = nn.Parameter(torch.ones((), dtype=torch.float32))
 
         self._last_generated: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}

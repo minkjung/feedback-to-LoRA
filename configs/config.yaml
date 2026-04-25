@@ -15,7 +15,7 @@ lora_l1_coef: 0.0       # disabled: gate-based init already prevents blow-up; L1
 learning_rate: 2.0e-5
 batch_size: 1
 gradient_accumulation_steps: 16
-max_epochs: 10
+max_epochs: 1
 early_stopping_patience: 10
 warmup_ratio: 0.1
 max_grad_norm: 1.0

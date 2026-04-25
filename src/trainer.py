@@ -60,8 +60,22 @@ class Trainer:
             collate_fn=collate_singletons,
         )
 
-        trainable = [p for p in self.hypernetwork.parameters() if p.requires_grad]
-        self.optimizer = AdamW(trainable, lr=config.learning_rate)
+        # Gate params (scaler_A, scaler_B, alpha) are tiny scalars — give them
+        # 10x LR so they move in step with the much larger projection heads.
+        gate_params, other_params = [], []
+        for name, p in self.hypernetwork.named_parameters():
+            if not p.requires_grad:
+                continue
+            if name.startswith(("scaler_A.", "scaler_B.", "alpha.")):
+                gate_params.append(p)
+            else:
+                other_params.append(p)
+        self.optimizer = AdamW(
+            [
+                {"params": other_params, "lr": config.learning_rate},
+                {"params": gate_params, "lr": config.learning_rate * 10},
+            ]
+        )
 
         total_steps = max(1, len(self.train_loader) * config.max_epochs)
         self.warmup_steps = int(config.warmup_ratio * total_steps)
@@ -134,7 +148,9 @@ class Trainer:
     def _set_lr(self) -> None:
         scale = self._lr_scale(self.global_step)
         for g in self.optimizer.param_groups:
-            g["lr"] = self.config.learning_rate * scale
+            if "base_lr" not in g:
+                g["base_lr"] = g["lr"]  # capture the per-group LR set at init
+            g["lr"] = g["base_lr"] * scale
 
     # ---------- per-sample loss ----------
 
